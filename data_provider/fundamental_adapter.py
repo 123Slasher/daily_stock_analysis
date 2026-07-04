@@ -384,6 +384,36 @@ class _TushareFundamentalClient:
         except Exception:
             return None
 
+        def get_moneyflow(self, stock_code: str, trade_date: Optional[str] = None) -> Optional[Dict[str, Any]]:
+            """Fetch individual stock moneyflow from Tushare (主力资金流向)."""
+            ts = _ts_code(stock_code)
+            try:
+                if not trade_date:
+                    trade_date = datetime.now().strftime("%Y%m%d")
+                fields = "ts_code,trade_date,buy_lg_vol,buy_lg_amount,sell_lg_vol,sell_lg_amount,buy_elg_vol,buy_elg_amount,sell_elg_vol,sell_elg_amount,net_mf_vol,net_mf_amount"
+                df = self._query("moneyflow", fields=fields, ts_code=ts, trade_date=trade_date)
+                if df is None or df.empty:
+                    return None
+                row = df.iloc[0]
+                net_mf_amount = _safe_float(row.get("net_mf_amount"))
+                net_mf_vol = _safe_float(row.get("net_mf_vol"))
+                buy_lg = _safe_float(row.get("buy_lg_amount")) or 0
+                sell_lg = _safe_float(row.get("sell_lg_amount")) or 0
+                buy_elg = _safe_float(row.get("buy_elg_amount")) or 0
+                sell_elg = _safe_float(row.get("sell_elg_amount")) or 0
+                main_force_net = (buy_lg + buy_elg) - (sell_lg + sell_elg)
+                return {
+                    "trade_date": trade_date,
+                    "net_mf_amount_wan": net_mf_amount,
+                    "main_force_net_wan": main_force_net,
+                    "buy_lg_amount_wan": buy_lg,
+                    "sell_lg_amount_wan": sell_lg,
+                    "buy_elg_amount_wan": buy_elg,
+                    "sell_elg_amount_wan": sell_elg,
+                }
+            except Exception as e:
+                logger.warning(f"Tushare moneyflow failed for {stock_code}: {e}")
+                return None
 
 class AkshareFundamentalAdapter:
     """Fundamental adapter: Tushare-first, AkShare fallback."""
