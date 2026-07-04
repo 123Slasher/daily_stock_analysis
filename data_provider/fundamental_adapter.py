@@ -385,31 +385,54 @@ class _TushareFundamentalClient:
             return None
 
         def get_moneyflow(self, stock_code: str, trade_date: Optional[str] = None) -> Optional[Dict[str, Any]]:
-            """Fetch individual stock moneyflow from Tushare (主力资金流向)."""
+            """Fetch 3-day individual stock moneyflow from Tushare (主力资金流向)."""
             ts = _ts_code(stock_code)
             try:
                 if not trade_date:
                     trade_date = datetime.now().strftime("%Y%m%d")
+                start_date = (datetime.now() - timedelta(days=7)).strftime("%Y%m%d")
                 fields = "ts_code,trade_date,buy_lg_vol,buy_lg_amount,sell_lg_vol,sell_lg_amount,buy_elg_vol,buy_elg_amount,sell_elg_vol,sell_elg_amount,net_mf_vol,net_mf_amount"
-                df = self._query("moneyflow", fields=fields, ts_code=ts, trade_date=trade_date)
+                df = self._query("moneyflow", fields=fields, ts_code=ts, start_date=start_date, end_date=trade_date)
                 if df is None or df.empty:
                     return None
-                row = df.iloc[0]
-                net_mf_amount = _safe_float(row.get("net_mf_amount"))
-                net_mf_vol = _safe_float(row.get("net_mf_vol"))
-                buy_lg = _safe_float(row.get("buy_lg_amount")) or 0
-                sell_lg = _safe_float(row.get("sell_lg_amount")) or 0
-                buy_elg = _safe_float(row.get("buy_elg_amount")) or 0
-                sell_elg = _safe_float(row.get("sell_elg_amount")) or 0
-                main_force_net = (buy_lg + buy_elg) - (sell_lg + sell_elg)
+                
+                daily = []
+                for _, row in df.iterrows():
+                    dt = str(row.get("trade_date", ""))
+                    net_mf = _safe_float(row.get("net_mf_amount"))
+                    buy_lg = _safe_float(row.get("buy_lg_amount")) or 0
+                    sell_lg = _safe_float(row.get("sell_lg_amount")) or 0
+                    buy_elg = _safe_float(row.get("buy_elg_amount")) or 0
+                    sell_elg = _safe_float(row.get("sell_elg_amount")) or 0
+                    daily.append({
+                        "date": f"{dt[:4]}-{dt[4:6]}-{dt[6:8]}" if len(dt) >= 8 else dt,
+                        "net_amount_wan": net_mf,
+                        "main_force_net_wan": (buy_lg + buy_elg) - (sell_lg + sell_elg),
+                    })
+                
+                net_flows = [d["net_amount_wan"] for d in daily if d["net_amount_wan"] is not None]
+                total_3d = sum(net_flows) if net_flows else None
+                
+                consecutive_days = 0
+                consecutive_dir = "mixed"
+                if net_flows:
+                    recent_dir = "inflow" if net_flows[-1] > 0 else "outflow"
+                    for f in reversed(net_flows):
+                        if (recent_dir == "inflow" and f > 0) or (recent_dir == "outflow" and f < 0):
+                            consecutive_days += 1
+                        else:
+                            break
+                    consecutive_dir = f"{recent_dir}_{consecutive_days}d" if consecutive_days >= 2 else "mixed"
+                
+                latest = daily[-1] if daily else {}
                 return {
                     "trade_date": trade_date,
-                    "net_mf_amount_wan": net_mf_amount,
-                    "main_force_net_wan": main_force_net,
-                    "buy_lg_amount_wan": buy_lg,
-                    "sell_lg_amount_wan": sell_lg,
-                    "buy_elg_amount_wan": buy_elg,
-                    "sell_elg_amount_wan": sell_elg,
+                    "total_net_3d_wan": total_3d,
+                    "consecutive_direction": consecutive_dir,
+                    "consecutive_days": consecutive_days,
+                    "latest_net_wan": latest.get("net_amount_wan"),
+                    "latest_main_force_wan": latest.get("main_force_net_wan"),
+                    "daily": daily[-3:],
                 }
             except Exception as e:
                 logger.warning(f"Tushare moneyflow failed for {stock_code}: {e}")
