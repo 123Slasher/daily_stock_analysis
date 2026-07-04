@@ -495,10 +495,19 @@ class AkshareFundamentalAdapter:
             if express:
                 result["earnings"]["quick_report_summary"] = express[:200]
                 result["source_chain"].append("earnings_quick:tushare.express")
-        except Exception as e:
-            result["errors"].append(f"tushare_express:{e}")
-
-        return result
+            except Exception as e:
+                result["errors"].append(f"tushare_express:{e}")
+    
+            # Moneyflow (主力资金流向)
+            try:
+                mf = self._ts_client.get_moneyflow(stock_code)
+                if mf:
+                    result["moneyflow"] = mf
+                    result["source_chain"].append("moneyflow:tushare.moneyflow")
+            except Exception as e:
+                result["errors"].append(f"tushare_moneyflow:{e}")
+    
+            return result
 
     def _call_df_candidates(
         self,
