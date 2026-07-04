@@ -415,6 +415,29 @@ class _TushareFundamentalClient:
                 logger.warning(f"Tushare moneyflow failed for {stock_code}: {e}")
                 return None
 
+        def get_daily_basic(self, stock_code: str, trade_date: Optional[str] = None) -> Optional[Dict[str, Any]]:
+            """Fetch daily basic valuation from Tushare (PE/PB/市值)."""
+            ts = _ts_code(stock_code)
+            try:
+                if not trade_date:
+                    trade_date = datetime.now().strftime("%Y%m%d")
+                fields = "ts_code,trade_date,pe,pe_ttm,pb,total_mv,circ_mv"
+                df = self._query("daily_basic", fields=fields, ts_code=ts, trade_date=trade_date)
+                if df is None or df.empty:
+                    return None
+                row = df.iloc[0]
+                return {
+                    "trade_date": trade_date,
+                    "pe": _safe_float(row.get("pe")),
+                    "pe_ttm": _safe_float(row.get("pe_ttm")),
+                    "pb": _safe_float(row.get("pb")),
+                    "total_mv_yi": (_safe_float(row.get("total_mv")) or 0) / 10000,
+                    "circ_mv_yi": (_safe_float(row.get("circ_mv")) or 0) / 10000,
+                }
+            except Exception as e:
+                logger.warning(f"Tushare daily_basic failed for {stock_code}: {e}")
+                return None
+
 class AkshareFundamentalAdapter:
     """Fundamental adapter: Tushare-first, AkShare fallback."""
 
