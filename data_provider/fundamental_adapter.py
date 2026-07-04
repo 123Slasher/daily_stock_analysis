@@ -1,19 +1,23 @@
 # -*- coding: utf-8 -*-
 """
-AkShare fundamental adapter (fail-open).
+Fundamental adapter (Tushare-first, AkShare fallback).
 
-This adapter intentionally uses capability probing against multiple AkShare
-endpoint candidates. It should never raise to caller; partial data is allowed.
+This adapter tries Tushare Pro API first (if TUSHARE_TOKEN is configured),
+then falls back to AkShare for Chinese financial data.
+Never raises to caller; partial data is allowed.
 """
 
 from __future__ import annotations
 
+import json as _json
 import logging
+import os
 import re
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -131,7 +135,6 @@ def _parse_dividend_plan_to_per_share(plan_text: str) -> Optional[float]:
 def _extract_cash_dividend_per_share(row: pd.Series) -> Optional[float]:
     """Extract pre-tax cash dividend per share from a row."""
     plan_text = _safe_str(_pick_by_keywords(row, _DIVIDEND_KEYWORD_MAP["plan_text"]))
-    # Keep pre-tax semantics; skip explicit after-tax plans unless pre-tax marker exists.
     if "税后" in plan_text and "税前" not in plan_text and "含税" not in plan_text:
         return None
 
@@ -257,12 +260,215 @@ def _extract_latest_row(df: pd.DataFrame, stock_code: str) -> Optional[pd.Series
                 continue
         return None
 
-    # Fallback: use latest row
     return df.iloc[0]
 
 
+def _ts_code(stock_code: str) -> str:
+    """Convert 6-digit code to Tushare ts_code format (e.g. 600519 → 600519.SH)."""
+    code = stock_code.strip().upper().replace(".SH", "").replace(".SZ", "").replace(".BJ", "")
+    if code.startswith("6"):
+        return f"{code}.SH"
+    elif code.startswith(("0", "3")):
+        return f"{code}.SZ"
+    elif code.startswith(("4", "8")):
+        return f"{code}.BJ"
+    return code
+
+
+def _get_tushare_token() -> Optional[str]:
+    """Get Tushare token from environment or config, matching project convention."""
+    token = os.getenv("TUSHARE_TOKEN", "").strip()
+    if token:
+        return token
+    try:
+        from src.config import get_config
+        return (get_config().tushare_token or "").strip() or None
+    except Exception:
+        return None
+
+
+class _TushareFundamentalClient:
+    """Lightweight Tushare Pro client for fundamental data (no SDK required)."""
+
+    def __init__(self, token: str, timeout: int = 30):
+        self._token = token
+        self._timeout = timeout
+        self._api_url = "http://api.tushare.pro"
+
+    def _query(self, api_name: str, fields: str = "", **kwargs) -> pd.DataFrame:
+        req_params = {
+            "api_name": api_name,
+            "token": self._token,
+            "params": kwargs,
+            "fields": fields,
+        }
+        try:
+            res = requests.post(self._api_url, json=req_params, timeout=self._timeout)
+            if res.status_code != 200:
+                raise Exception(f"Tushare HTTP {res.status_code}")
+            result = _json.loads(res.text)
+            if result.get("code") != 0:
+                raise Exception(result.get("msg") or f"Tushare error code {result.get('code')}")
+            data = result.get("data") or {}
+            columns = data.get("fields") or []
+            items = data.get("items") or []
+            return pd.DataFrame(items, columns=columns)
+        except Exception as e:
+            logger.warning(f"Tushare {api_name} failed: {e}")
+            raise
+
+    def get_financial_indicators(self, stock_code: str) -> Optional[pd.DataFrame]:
+        """Fetch fina_indicator (ROE, 毛利率, 营收同比, etc.) from Tushare."""
+        ts = _ts_code(stock_code)
+        fields = "ts_code,end_date,roe,roe_yoy,grossprofit_margin,or_yoy,profit_dedt,total_revenue,profit_to_op"
+        try:
+            df = self._query("fina_indicator", fields=fields, ts_code=ts, limit=4)
+            if df.empty:
+                return None
+            # Sort by end_date descending
+            if "end_date" in df.columns:
+                df = df.sort_values("end_date", ascending=False)
+            return df
+        except Exception:
+            return None
+
+    def get_forecast(self, stock_code: str) -> Optional[str]:
+        """Fetch earnings forecast from Tushare."""
+        ts = _ts_code(stock_code)
+        fields = "ts_code,ann_date,end_date,type,change_reason,p_change_min,p_change_max,net_profit_min"
+        try:
+            df = self._query("forecast", fields=fields, ts_code=ts, limit=1)
+            if df.empty:
+                return None
+            row = df.iloc[0]
+            forecast_type = _safe_str(row.get("type", ""))
+            change_reason = _safe_str(row.get("change_reason", ""))
+            p_min = _safe_float(row.get("p_change_min"))
+            p_max = _safe_float(row.get("p_change_max"))
+            parts = []
+            if forecast_type:
+                parts.append(f"类型: {forecast_type}")
+            if p_min is not None and p_max is not None:
+                parts.append(f"净利润变动: {p_min:.1f}%~{p_max:.1f}%")
+            elif p_min is not None:
+                parts.append(f"净利润变动: {p_min:.1f}%")
+            if change_reason:
+                parts.append(f"原因: {change_reason[:150]}")
+            return "；".join(parts) if parts else None
+        except Exception:
+            return None
+
+    def get_express(self, stock_code: str) -> Optional[str]:
+        """Fetch quick earnings report from Tushare."""
+        ts = _ts_code(stock_code)
+        fields = "ts_code,ann_date,end_date,revenue,yoy,net_profit,yoy_np,eps"
+        try:
+            df = self._query("express", fields=fields, ts_code=ts, limit=1)
+            if df.empty:
+                return None
+            row = df.iloc[0]
+            revenue = _safe_float(row.get("revenue"))
+            yoy = _safe_float(row.get("yoy"))
+            net_profit = _safe_float(row.get("net_profit"))
+            yoy_np = _safe_float(row.get("yoy_np"))
+            parts = []
+            if revenue is not None:
+                parts.append(f"营收: {revenue/1e8:.2f}亿")
+            if yoy is not None:
+                parts.append(f"营收同比: {yoy:.1f}%")
+            if net_profit is not None:
+                parts.append(f"净利润: {net_profit/1e8:.2f}亿")
+            if yoy_np is not None:
+                parts.append(f"净利同比: {yoy_np:.1f}%")
+            return "；".join(parts) if parts else None
+        except Exception:
+            return None
+
+
 class AkshareFundamentalAdapter:
-    """AkShare adapter for fundamentals, capital flow and dragon-tiger signals."""
+    """Fundamental adapter: Tushare-first, AkShare fallback."""
+
+    def __init__(self):
+        self._ts_client: Optional[_TushareFundamentalClient] = None
+        self._try_init_tushare()
+
+    def _try_init_tushare(self) -> None:
+        token = _get_tushare_token()
+        if not token:
+            logger.info("Tushare token not configured, will use AkShare only")
+            return
+        try:
+            self._ts_client = _TushareFundamentalClient(token)
+            logger.info("Tushare fundamental client initialized")
+        except Exception as e:
+            logger.warning(f"Tushare fundamental client init failed: {e}")
+            self._ts_client = None
+
+    def _get_fundamental_from_tushare(self, stock_code: str) -> Dict[str, Any]:
+        """Fetch fundamental data from Tushare API."""
+        result: Dict[str, Any] = {
+            "growth": {},
+            "earnings": {},
+            "institution": {},
+            "source_chain": [],
+            "errors": [],
+        }
+
+        if self._ts_client is None:
+            return result
+
+        # Financial indicators
+        try:
+            fin_df = self._ts_client.get_financial_indicators(stock_code)
+            if fin_df is not None and not fin_df.empty:
+                row = fin_df.iloc[0]
+                roe = _safe_float(row.get("roe"))
+                gross_margin = _safe_float(row.get("grossprofit_margin"))
+                revenue_yoy = _safe_float(row.get("or_yoy"))
+                profit_yoy = _safe_float(row.get("profit_dedt"))
+                total_revenue = _safe_float(row.get("total_revenue"))
+                net_profit_parent = _safe_float(row.get("profit_to_op"))
+                end_date = _safe_str(row.get("end_date", ""))
+
+                if any(v is not None for v in [roe, gross_margin, revenue_yoy, profit_yoy]):
+                    result["growth"] = {
+                        "revenue_yoy": revenue_yoy,
+                        "net_profit_yoy": profit_yoy,
+                        "roe": roe,
+                        "gross_margin": gross_margin,
+                    }
+                    result["source_chain"].append("growth:tushare.fina_indicator")
+
+                financial_report = {
+                    "report_date": f"{end_date[:4]}-{end_date[4:6]}-{end_date[6:8]}" if len(end_date) >= 8 else end_date,
+                    "revenue": total_revenue,
+                    "net_profit_parent": net_profit_parent,
+                    "roe": roe,
+                }
+                if any(v is not None for v in financial_report.values() if v != financial_report.get("report_date")):
+                    result["earnings"]["financial_report"] = financial_report
+        except Exception as e:
+            result["errors"].append(f"tushare_fina:{e}")
+
+        # Earnings forecast
+        try:
+            forecast = self._ts_client.get_forecast(stock_code)
+            if forecast:
+                result["earnings"]["forecast_summary"] = forecast[:200]
+                result["source_chain"].append("earnings_forecast:tushare.forecast")
+        except Exception as e:
+            result["errors"].append(f"tushare_forecast:{e}")
+
+        # Quick report
+        try:
+            express = self._ts_client.get_express(stock_code)
+            if express:
+                result["earnings"]["quick_report_summary"] = express[:200]
+                result["source_chain"].append("earnings_quick:tushare.express")
+        except Exception as e:
+            result["errors"].append(f"tushare_express:{e}")
+
+        return result
 
     def _call_df_candidates(
         self,
@@ -291,7 +497,8 @@ class AkshareFundamentalAdapter:
 
     def get_fundamental_bundle(self, stock_code: str) -> Dict[str, Any]:
         """
-        Return normalized fundamental blocks from AkShare with partial tolerance.
+        Return normalized fundamental blocks.
+        Tushare-first (API, works anywhere), AkShare fallback.
         """
         result: Dict[str, Any] = {
             "status": "not_supported",
@@ -302,6 +509,19 @@ class AkshareFundamentalAdapter:
             "errors": [],
         }
 
+        # ---- Try Tushare first ----
+        ts_result = self._get_fundamental_from_tushare(stock_code)
+        if ts_result.get("growth") or ts_result.get("earnings"):
+            result["growth"] = ts_result["growth"]
+            result["earnings"] = ts_result["earnings"]
+            result["source_chain"] = ts_result.get("source_chain", [])
+            result["errors"] = ts_result.get("errors", [])
+            has_content = bool(result["growth"] or result["earnings"])
+            result["status"] = "partial" if has_content else "not_supported"
+            if has_content:
+                return result  # Tushare got data, skip AkShare for fundamentals
+
+        # ---- Fallback: AkShare ----
         # Financial indicators
         fin_df, fin_source, fin_errors = self._call_df_candidates([
             ("stock_financial_abstract", {"symbol": stock_code}),
@@ -322,11 +542,12 @@ class AkshareFundamentalAdapter:
                 operating_cash_flow = _safe_float(
                     _pick_by_keywords(row, ["经营活动产生的现金流量净额", "经营现金流", "经营活动现金流"])
                 )
+                # Merge with Tushare data (Tushare may have partial, AkShare fills gaps)
                 result["growth"] = {
-                    "revenue_yoy": revenue_yoy,
-                    "net_profit_yoy": profit_yoy,
-                    "roe": roe,
-                    "gross_margin": gross_margin,
+                    "revenue_yoy": ts_result.get("growth", {}).get("revenue_yoy") or revenue_yoy,
+                    "net_profit_yoy": ts_result.get("growth", {}).get("net_profit_yoy") or profit_yoy,
+                    "roe": ts_result.get("growth", {}).get("roe") or roe,
+                    "gross_margin": ts_result.get("growth", {}).get("gross_margin") or gross_margin,
                 }
                 financial_report_payload = {
                     "report_date": report_date,
@@ -335,11 +556,15 @@ class AkshareFundamentalAdapter:
                     "operating_cash_flow": operating_cash_flow,
                     "roe": roe,
                 }
-                if any(v is not None for v in financial_report_payload.values()):
-                    result["earnings"]["financial_report"] = financial_report_payload
+                # Merge: Tushare financial_report + AkShare extras
+                ts_fin = ts_result.get("earnings", {}).get("financial_report") or {}
+                merged = {**financial_report_payload, **ts_fin}
+                merged = {k: v for k, v in merged.items() if v is not None}
+                if merged:
+                    result["earnings"]["financial_report"] = merged
                 result["source_chain"].append(f"growth:{fin_source}")
 
-        # Earnings forecast
+        # Earnings forecast (AkShare)
         forecast_df, forecast_source, forecast_errors = self._call_df_candidates([
             ("stock_yjyg_em", {"symbol": stock_code}),
             ("stock_yjyg_em", {}),
@@ -350,12 +575,14 @@ class AkshareFundamentalAdapter:
         if forecast_df is not None:
             row = _extract_latest_row(forecast_df, stock_code)
             if row is not None:
-                result["earnings"]["forecast_summary"] = _safe_str(
-                    _pick_by_keywords(row, ["预告", "业绩变动", "内容", "摘要", "公告"])
-                )[:200]
+                # Only set if Tushare didn't already provide forecast
+                if "forecast_summary" not in result["earnings"]:
+                    result["earnings"]["forecast_summary"] = _safe_str(
+                        _pick_by_keywords(row, ["预告", "业绩变动", "内容", "摘要", "公告"])
+                    )[:200]
                 result["source_chain"].append(f"earnings_forecast:{forecast_source}")
 
-        # Earnings quick report
+        # Earnings quick report (AkShare)
         quick_df, quick_source, quick_errors = self._call_df_candidates([
             ("stock_yjkb_em", {"symbol": stock_code}),
             ("stock_yjkb_em", {}),
@@ -364,9 +591,10 @@ class AkshareFundamentalAdapter:
         if quick_df is not None:
             row = _extract_latest_row(quick_df, stock_code)
             if row is not None:
-                result["earnings"]["quick_report_summary"] = _safe_str(
-                    _pick_by_keywords(row, ["快报", "摘要", "公告", "说明"])
-                )[:200]
+                if "quick_report_summary" not in result["earnings"]:
+                    result["earnings"]["quick_report_summary"] = _safe_str(
+                        _pick_by_keywords(row, ["快报", "摘要", "公告", "说明"])
+                    )[:200]
                 result["source_chain"].append(f"earnings_quick:{quick_source}")
 
         # Dividend details (cash dividend, pre-tax)
@@ -492,7 +720,6 @@ class AkshareFundamentalAdapter:
         if df is None:
             return result
 
-        # Try code filter
         code_cols = [c for c in df.columns if any(k in str(c) for k in ("代码", "股票代码", "证券代码"))]
         target = _normalize_code(stock_code)
         matched = pd.DataFrame()
