@@ -506,6 +506,12 @@ jobs:
           else
             python main.py $FORCE_RUN_ARG
           fi
+
+          # === AlphaSift 选股推荐 ===
+          echo ""
+          echo "🔍 ========== AlphaSift 选股推荐 =========="
+          alphasift screen balanced_alpha --no-llm --max-output 10 2>&1 || echo "⚠️ AlphaSift 选股未生成结果"
+          echo "============================================"
       
       - name: 上传分析报告
         uses: actions/upload-artifact@v6
