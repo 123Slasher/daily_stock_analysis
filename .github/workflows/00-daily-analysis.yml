@@ -378,6 +378,7 @@ jobs:
           # 运行配置 ⬅️ 新增！
           # ==========================================
           REPORT_TYPE: ${{ vars.REPORT_TYPE || secrets.REPORT_TYPE || 'simple' }}
+          REPORT_RENDERER_ENABLED: ${{ vars.REPORT_RENDERER_ENABLED || 'false' }}
           ALPHASIFT_ENABLED: ${{ vars.ALPHASIFT_ENABLED || 'false' }}
           REPORT_LANGUAGE: ${{ vars.REPORT_LANGUAGE || secrets.REPORT_LANGUAGE || '' }}
           REPORT_SHOW_LLM_MODEL: ${{ vars.REPORT_SHOW_LLM_MODEL || secrets.REPORT_SHOW_LLM_MODEL || 'true' }}
