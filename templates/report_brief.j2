@@ -1,28 +1,27 @@
-  jinja2
-    🎯 {{ report_date }} {{ labels.brief_title }}
-    
-    > {{ results|length }} {{ labels.stock_unit_compact }} | 🟢{{ labels.buy_label }}:{{ buy_count }} 🟡{{ labels.watch_label }}:{{ hold_count }} 🔴{{ labels.sell_label }}:{{ sell_count }}
-    {%- if market_status_line %}
-    {{ market_status_line }}
-    {%- endif %}
-    {% for e in enriched -%}
-    {% set dash = e.result.dashboard or {} -%}
-    {% set core = (dash.get('core_conclusion') or {}) if dash else {} -%}
-    {% set battle = (dash.get('battle_plan') or {}) if dash else {} -%}
-    {% set sniper = battle.get('sniper_points', {}) if battle else {} -%}
-    {% set one = (core.get('one_sentence') or e.result.analysis_summary or '')[:80] %}
-    
-    {{ e.signal_emoji }} {{ e.stock_name }}({{ e.result.code }}) {{ e.localized_operation_advice }} | {{ labels.score_label }} {{ e.result.sentiment_score }}
-    {%- if sniper.ideal_buy or sniper.stop_loss or sniper.take_profit %}
-    > 买:{{ sniper.ideal_buy or '-' }}  止:{{ sniper.stop_loss or '-' }}  盈:{{ sniper.take_profit or '-' }}
-    {%- endif %}
-    > {{ one }}
-    {%- if e.result.risk_warning %}
-    > ⚠️ {{ e.result.risk_warning[:60] }}
-    {%- endif %}
-    
-    {% endfor -%}
-    {{ report_timestamp }}
-    {%- if show_llm_model and models_used %}
-    {{ labels.analysis_model_label }}: {{ models_used|join(', ') }}
-    {%- endif %}
+🎯 {{ report_date }} {{ labels.brief_title }}
+
+> {{ results|length }} {{ labels.stock_unit_compact }} | 🟢{{ labels.buy_label }}:{{ buy_count }} 🟡{{ labels.watch_label }}:{{ hold_count }} 🔴{{ labels.sell_label }}:{{ sell_count }}
+{%- if market_status_line %}
+{{ market_status_line }}
+{%- endif %}
+{% for e in enriched -%}
+{% set dash = e.result.dashboard or {} -%}
+{% set core = (dash.get('core_conclusion') or {}) if dash else {} -%}
+{% set battle = (dash.get('battle_plan') or {}) if dash else {} -%}
+{% set sniper = battle.get('sniper_points', {}) if battle else {} -%}
+{% set one = (core.get('one_sentence') or e.result.analysis_summary or '')[:80] %}
+
+{{ e.signal_emoji }} {{ e.stock_name }}({{ e.result.code }}) {{ e.localized_operation_advice }} | {{ labels.score_label }} {{ e.result.sentiment_score }}
+{%- if sniper.ideal_buy or sniper.stop_loss or sniper.take_profit %}
+> 买:{{ sniper.ideal_buy or '-' }}  止:{{ sniper.stop_loss or '-' }}  盈:{{ sniper.take_profit or '-' }}
+{%- endif %}
+> {{ one }}
+{%- if e.result.risk_warning %}
+> ⚠️ {{ e.result.risk_warning[:60] }}
+{%- endif %}
+
+{% endfor -%}
+{{ report_timestamp }}
+{%- if show_llm_model and models_used %}
+{{ labels.analysis_model_label }}: {{ models_used|join(', ') }}
+{%- endif %}
