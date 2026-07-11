@@ -510,7 +510,7 @@ jobs:
           # === AlphaSift 选股推荐 ===
           echo ""
           echo "🔍 ========== AlphaSift 选股推荐 =========="
-          alphasift screen balanced_alpha --no-llm --max-output 10 2>&1 || echo "⚠️ AlphaSift 选股未生成结果"
+          alphasift screen capital_heat --no-llm --max-output 10 2>&1 || echo "⚠️ AlphaSift 选股未生成结果"
           echo "============================================"
       
       - name: 上传分析报告
